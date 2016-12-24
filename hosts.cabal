@@ -20,7 +20,7 @@ executable hosts
   -- other-modules:       
   -- other-extensions:    
   build-depends:       base >=4.9 && <4.10,
-                       http-conduit >=2.2.0,
+                       http-conduit >=2.1.0,
                        bytestring >=0.10.8.1,
                        containers >=0.5.7.1,
                        text >=1.2.2.1,
