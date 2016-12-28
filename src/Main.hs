@@ -14,7 +14,10 @@ import qualified Data.Text.IO                         as T
 import           Network.HTTP.Conduit
 import           System.Console.GetOpt
 import           System.Directory
+import           System.FilePath
 import           System.Environment
+import Data.Either.Combinators
+import System.ProgressBar
 
 hostnamePath = "/etc/hostname"
 makeHeader hostname = T.concat
@@ -24,6 +27,7 @@ makeHeader hostname = T.concat
     , "127.0.0.1 localhost # IPv4 localhost\n"
     , "::1 localhost #IPv6 localhost\n\n"
     ]
+linePrefix = "0.0.0.0 "
 
 data Options = Options
     { urls      :: IO [String]
@@ -33,7 +37,7 @@ data Options = Options
     }
 defaultOptions    = Options
     { urls      = return []
-    , whitelist = return []
+    , whitelist = getDefaultWhitelist
     , hostname  = getHostName
     , output    = T.putStrLn
     }
@@ -54,26 +58,32 @@ options =
         "output file. Defaults to stdout"
     , Option ['w'] ["whitelist"]
         (ReqArg (\path opts -> opts{whitelist=(readFileLines path)}) "whitelist")
-        "whitelist file"
+        "whitelist file. Defaults to ~/.hosts_whitelist.txt"
     , Option ['h'] ["hostname"]
         (ReqArg (\host opts -> opts{hostname=(return . T.pack $ host)}) "host")
         "hostname to use. Tries to determine system hostname if unspecified"
     ]
+
 getOpts :: [String] -> IO (Options, [String])
 getOpts argv =
    case getOpt Permute options argv of
       (o,n,[]  ) -> return (foldl (flip id) defaultOptions o, n)
       (_,_,errs) -> ioError (userError (concat errs ++ usageInfo header options))
   where header = "Usage: hosts [OPTIONS...]"
+
 processArgs :: [String] -> IO ()
 processArgs args = do
     (opts, f) <- getOpts args
     whitelist <- whitelist opts
-    urls      <- urls opts
+    urls_     <- urls opts
     hostname  <- hostname opts
+    let urls = filterComments urls_
+    (bar, _)  <- startProgress (msg "Downloading") exact 80 $ fromIntegral $ length urls
     -- we use extraWorkerWhileBlocked to create extra threads to do work while
     -- existing ones are blocking on file downloads
-    sets      <- parallel $ map (extraWorkerWhileBlocked . downloadHostsFile) $ filterComments urls
+    sets      <- parallel $ map extraWorkerWhileBlocked $ map  (downloadHostsFile bar) $ urls
+    putStrLn ""
+    putStrLn "Joining files and writing output..."
     let finalSet     = S.unions sets
         whiteListSet = S.fromList $ map T.pack $ filterComments whitelist
         outputLines  = S.toList $ S.difference finalSet whiteListSet
@@ -89,16 +99,19 @@ filterLine (T.stripPrefix "0.0.0.0"   -> Just suf) = Just $ addPrefix suf
 filterLine (T.stripPrefix "::1"       -> Just suf) = Just $ addPrefix suf
 filterLine _                                       = Nothing
 -- remove anything after a # comment and add the starting prefix
-addPrefix l = T.append "0.0.0.0 " $ T.strip $ T.takeWhile (/= '#') l
+addPrefix l = T.append linePrefix $ T.strip $ T.takeWhile (/= '#') l
 
-downloadHostsFile :: String -> IO (S.Set T.Text)
-downloadHostsFile url = do
+downloadHostsFile :: ProgressRef -> String -> IO (S.Set T.Text)
+downloadHostsFile bar url = do
     fileContent <- catch (simpleHttp url)
                          (\e  -> do
+                            incProgress bar 1
                             let msg = show (e :: HttpException)
                             putStrLn $ "Failed to download: " ++ url
                             return "")
-    let text = T.decodeUtf8 $ BL.toStrict fileContent
+    incProgress bar 1
+    let eitherText = T.decodeUtf8' $ BL.toStrict fileContent
+        text = fromRight "" eitherText
         outputSet = S.fromList $ mapMaybe filterLine $ T.lines text
     return (outputSet)
 
@@ -118,3 +131,14 @@ getHostName = do
         do (T.readFile hostnamePath >>= return . T.strip)
     else
         return "localhost"
+
+getDefaultWhitelist :: IO [String]
+getDefaultWhitelist = do
+    homeFolder <- getHomeDirectory
+    let whitelistPath = homeFolder </> (".hosts_whitelist.txt" :: FilePath)
+    fileExists <- doesFileExist (whitelistPath :: FilePath)
+    if (fileExists) then do
+        filecontents <- readFile whitelistPath
+        return (lines filecontents)
+    else
+        return []

@@ -1,0 +1,5 @@
+.stack-work
+.idea
+hosts.iml
+**/*.hi
+**/*.o
