@@ -16,7 +16,6 @@ import           System.Console.GetOpt
 import           System.Directory
 import           System.Environment
 import           System.FilePath
-import           System.ProgressBar
 
 hostnamePath :: FilePath
 hostnamePath = "/etc/hostname"
@@ -82,10 +81,7 @@ processArgs args = do
     urls_     <- urls opts
     hostname  <- hostname opts
     let urls = filterComments urls_
-    (bar, _)  <- startProgress (msg "Downloading") exact 80 $ fromIntegral $ length urls
-    -- we use extraWorkerWhileBlocked to create extra threads to do work while
-    -- existing ones are blocking on file downloads
-    sets      <- parallel $ map (extraWorkerWhileBlocked . downloadHostsFile bar) urls
+    sets      <- parallel $ map (extraWorkerWhileBlocked . downloadHostsFile) urls
     putStrLn ""
     putStrLn "Joining files and writing output..."
     let finalSet     = S.unions sets
@@ -106,19 +102,18 @@ filterLine _                                       = Nothing
 -- remove anything after a # comment and add the starting prefix
 addPrefix l = T.append linePrefix $ T.strip $ T.takeWhile (/= '#') l
 
-downloadHostsFile :: ProgressRef -> String -> IO (S.Set T.Text)
-downloadHostsFile bar url = do
+downloadHostsFile :: String -> IO (S.Set T.Text)
+downloadHostsFile url = do
     fileContent <- catch (simpleHttp url)
                          nopHandler
-    incProgress bar 1
     let eitherText = T.decodeUtf8' $ BL.toStrict fileContent
         text = fromRight "" eitherText
         outputSet = S.fromList $ mapMaybe filterLine $ T.lines text
     return outputSet
   where
     nopHandler :: HttpException -> IO BL.ByteString
-    nopHandler e = do
-      incProgress bar 1
+    nopHandler _ = do
+      putStrLn $ "Failed to download " ++ url
       return ""
 
 filterComments :: [String] -> [String]
